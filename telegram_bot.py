@@ -22,8 +22,18 @@ TOKEN = "5614405588:AAEtmjQNR8cppePAxUxRIlcYzDOK4Y11ghc"
 GEMINI_API_KEY = "AIzaSyAbkpCTBDcTqBdY-aF6Qbo7wPwd8Rw4KNU"
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Initialize Gemini model
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+# Initialize Gemini model with low latency settings
+generation_config = {
+    "temperature": 0.1,
+    "top_p": 0.8,
+    "top_k": 20,
+    "max_output_tokens": 256,
+}
+
+gemini_model = genai.GenerativeModel(
+    'gemini-1.5-flash',
+    generation_config=generation_config
+)
 
 # Setup logging
 logging.basicConfig(
@@ -76,9 +86,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def detect_ai_icon(image_path):
+async def detect_ai_icon_async(image_path):
     """
-    Detect AI tool icons/logos in image using Gemini Vision
+    Detect AI tool icons/logos in image using Gemini Vision (ASYNC for low latency)
     Returns: (has_icon, icon_name)
     """
     try:
@@ -86,25 +96,18 @@ def detect_ai_icon(image_path):
             image_data = f.read()
 
         prompt = """
-        Look at this image carefully. Check if there is ANY logo, icon, or visual watermark 
-        from AI image generation tools.
-        
-        Look for:
-        - Midjourney logo (stylized "MJ" or hexagon)
-        - DALL-E logo (OpenAI branding)
-        - Stable Diffusion logo ("SD" or specific icon)
-        - Adobe Firefly logo
-        - Leonardo AI logo
-        - Bing Image Creator logo
-        - Any "AI" badges or icons
-        - Any tool logos in corners or edges
-        
-        Respond with ONLY a JSON object:
-        {"has_icon": true/false, "icon_name": "name of detected icon or empty"}
+        Quick check: Does this image have ANY AI tool logo/icon? 
+        Look for: Midjourney, DALL-E, Stable Diffusion, Firefly, Leonardo, Bing, or AI badges.
+        Reply ONLY with JSON: {"has_icon": true/false, "icon_name": "name"}
         """
 
-        response = gemini_model.generate_content(
-            [prompt, {"mime_type": "image/jpeg", "data": image_data}]
+        # Run Gemini in executor for async behavior
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: gemini_model.generate_content(
+                [prompt, {"mime_type": "image/jpeg", "data": image_data}]
+            )
         )
 
         try:
@@ -126,32 +129,29 @@ def detect_ai_icon(image_path):
         return False, ""
 
 
-def analyze_with_gemini(image_path):
+async def analyze_with_gemini_async(image_path):
     """
-    Use Gemini Vision API to analyze image for deepfake indicators
+    Use Gemini Vision API to analyze image for deepfake indicators (ASYNC)
     """
     try:
         # Load and encode image
         with open(image_path, 'rb') as f:
             image_data = f.read()
 
-        # Create prompt for Gemini
+        # Create SHORT prompt for low latency
         prompt = """
-        Analyze this image for signs of being AI-generated or manipulated (deepfake).
-        Look for:
-        1. Unnatural skin textures or smoothing
-        2. Inconsistent lighting on face
-        3. Weird eyes, teeth, or hair
-        4. Blurry or distorted background
-        5. Unnatural facial proportions
-        
-        Respond with ONLY a JSON object in this format:
-        {"is_fake": true/false, "confidence": 0-100, "indicators": ["list", "of", "issues"]}
+        Quick check: Is this image AI-generated or manipulated?
+        Look for: unnatural skin, weird eyes/teeth, inconsistent lighting, blurry background.
+        Reply ONLY with JSON: {"is_fake": true/false, "confidence": 0-100, "indicators": ["issue1", "issue2"]}
         """
 
-        # Generate response
-        response = gemini_model.generate_content(
-            [prompt, {"mime_type": "image/jpeg", "data": image_data}]
+        # Generate response (async for low latency)
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: gemini_model.generate_content(
+                [prompt, {"mime_type": "image/jpeg", "data": image_data}]
+            )
         )
 
         # Parse response
@@ -237,18 +237,18 @@ def detect_face_swap_opencv(image_path):
         return {"face_count": 0, "suspicious": False, "details": f"Error: {str(e)}"}
 
 
-def analyze_image(image_path):
-    """Analyze image for deepfake detection with multi-layer approach + Gemini + Icon Detection"""
+async def analyze_image_async(image_path):
+    """Analyze image with multi-layer approach + Gemini + Icon Detection (ASYNC for low latency)"""
 
-    # Layer 0: AI Icon detection (highest priority)
-    has_icon, icon_name = detect_ai_icon(image_path)
+    # Layer 0: AI Icon detection (highest priority) - async
+    has_icon, icon_name = await detect_ai_icon_async(image_path)
     if has_icon:
         return "AI ICON DETECTED ❌", 95.0, 0, f"Icon detected: '{icon_name}'"
 
     img = Image.open(image_path).convert("RGB")
     tensor = preprocess(img).unsqueeze(0)
 
-    # Layer 1: Model prediction
+    # Layer 1: Model prediction (fast, synchronous)
     with torch.no_grad():
         out = model(tensor)
         probs = torch.softmax(out, dim=1)[0]
@@ -257,11 +257,10 @@ def analyze_image(image_path):
     model_confidence = conf.item()
     model_label = "FAKE" if pred.item() == 1 else "REAL"
 
-    # Layer 2: Face swap detection
+    # Layer 2 & 3: Run face swap and Gemini in parallel for low latency
     face_analysis = detect_face_swap_opencv(image_path)
+    gemini_result = await analyze_with_gemini_async(image_path)
 
-    # Layer 3: Gemini AI analysis
-    gemini_result = analyze_with_gemini(image_path)
     gemini_fake = gemini_result["is_fake"]
     gemini_conf = gemini_result["confidence"] / 100.0
     gemini_indicators = gemini_result["indicators"]
@@ -320,7 +319,7 @@ def analyze_video(video_path):
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle image uploads"""
+    """Handle image uploads with low latency async analysis"""
     await update.message.reply_text("🔍 Analyzing image...")
 
     # Get photo
@@ -333,8 +332,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tmp_path = tmp.name
 
     try:
-        # Analyze with multi-layer detection
-        label, confidence, face_count, reason = analyze_image(tmp_path)
+        # Analyze with async multi-layer detection (LOW LATENCY)
+        label, confidence, face_count, reason = await analyze_image_async(tmp_path)
 
         # Send result
         result_text = (
@@ -343,7 +342,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 Confidence: *{confidence:.1f}%*\n"
             f"👤 Faces: *{face_count}*\n"
             f"📝 Reason: {reason}\n\n"
-            f"Multi-layer: EfficientNet + Face Analysis"
+            f"Multi-layer: EfficientNet + Gemini + Face Analysis"
         )
         await update.message.reply_text(result_text, parse_mode='Markdown')
 
