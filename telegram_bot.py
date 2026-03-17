@@ -6,6 +6,7 @@ from io import BytesIO
 
 import torch
 import cv2
+import numpy as np
 from PIL import Image
 from torchvision.models import efficientnet_b0
 from torchvision import transforms
@@ -66,21 +67,103 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def detect_face_swap_opencv(image_path):
+    """
+    Face swap detection using OpenCV:
+    1. Face detection quality
+    2. Edge artifacts around face
+    3. Color consistency
+    """
+    try:
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Load classifiers
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        
+        # Detect faces
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        face_count = len(faces)
+        
+        if face_count == 0:
+            return {"face_count": 0, "suspicious": False, "details": "No face detected"}
+        
+        suspicious_indicators = []
+        
+        for (x, y, w, h) in faces:
+            # Extract face region
+            face_roi = img[y:y+h, x:x+w]
+            face_gray = gray[y:y+h, x:x+w]
+            
+            # Check 1: Face edge sharpness (swapped faces often have blur at edges)
+            edges = cv2.Canny(face_gray, 100, 200)
+            edge_ratio = np.sum(edges > 0) / (w * h)
+            if edge_ratio < 0.05:
+                suspicious_indicators.append("unnatural_face_edges")
+            
+            # Check 2: Color consistency in face vs background
+            face_mean = np.mean(face_roi, axis=(0,1))
+            bg_roi = img[max(0,y-20):y, max(0,x-20):x+w+20]
+            if bg_roi.size > 0:
+                bg_mean = np.mean(bg_roi, axis=(0,1))
+                color_diff = np.abs(face_mean - bg_mean)
+                if np.mean(color_diff) > 60:
+                    suspicious_indicators.append("color_mismatch")
+            
+            # Check 3: Face aspect ratio (unnatural proportions)
+            aspect_ratio = w / h
+            if aspect_ratio < 0.7 or aspect_ratio > 0.95:
+                suspicious_indicators.append("unnatural_proportions")
+        
+        is_suspicious = len(suspicious_indicators) >= 2
+        
+        return {
+            "face_count": face_count,
+            "suspicious": is_suspicious,
+            "indicators": suspicious_indicators,
+            "details": ", ".join(suspicious_indicators) if suspicious_indicators else "Normal"
+        }
+    except Exception as e:
+        return {"face_count": 0, "suspicious": False, "details": f"Error: {str(e)}"}
+
+
 def analyze_image(image_path):
-    """Analyze image for deepfake detection"""
+    """Analyze image for deepfake detection with multi-layer approach"""
     img = Image.open(image_path).convert("RGB")
     tensor = preprocess(img).unsqueeze(0)
 
+    # Layer 1: Model prediction
     with torch.no_grad():
         out = model(tensor)
         probs = torch.softmax(out, dim=1)[0]
         conf, pred = torch.max(probs, dim=0)
 
-    is_real = pred.item() == 0
-    label = "REAL ✅" if is_real else "DEEPFAKE ❌"
-    confidence = conf.item() * 100
-
-    return label, confidence
+    model_confidence = conf.item()
+    model_label = "FAKE" if pred.item() == 1 else "REAL"
+    
+    # Layer 2: Face swap detection
+    face_analysis = detect_face_swap_opencv(image_path)
+    
+    # Multi-layer decision
+    if model_confidence > 0.85 and model_label == "FAKE":
+        final_label = "DEEPFAKE ❌"
+        reason = "High confidence AI detection"
+    elif face_analysis["suspicious"] and model_label == "FAKE":
+        final_label = "FACE SWAP ❌"
+        reason = f"Face swap detected: {face_analysis['details']}"
+    elif model_confidence > 0.7 and model_label == "FAKE":
+        final_label = "SUSPICIOUS ⚠️"
+        reason = "Possible manipulation"
+    elif face_analysis["suspicious"]:
+        final_label = "SUSPICIOUS ⚠️"
+        reason = f"Anomalies: {face_analysis['details']}"
+    else:
+        final_label = "REAL ✅"
+        reason = "No manipulation detected"
+    
+    confidence = model_confidence * 100
+    
+    return final_label, confidence, face_analysis["face_count"], reason
 
 
 def analyze_video(video_path):
@@ -122,15 +205,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tmp_path = tmp.name
 
     try:
-        # Analyze
-        label, confidence = analyze_image(tmp_path)
+        # Analyze with multi-layer detection
+        label, confidence, face_count, reason = analyze_image(tmp_path)
 
         # Send result
         result_text = (
             f"🧠 *Analysis Result*\n\n"
             f"📊 Prediction: *{label}*\n"
-            f"🎯 Confidence: *{confidence:.1f}%*\n\n"
-            f"Powered by EfficientNet-B0"
+            f"🎯 Confidence: *{confidence:.1f}%*\n"
+            f"👤 Faces: *{face_count}*\n"
+            f"📝 Reason: {reason}\n\n"
+            f"Multi-layer: EfficientNet + Face Analysis"
         )
         await update.message.reply_text(result_text, parse_mode='Markdown')
 
