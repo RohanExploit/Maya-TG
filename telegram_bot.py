@@ -457,25 +457,25 @@ def detect_face_swap_opencv(image_path):
 
 async def analyze_image_async(image_path):
     """Analyze image with ENHANCED multi-layer approach (ASYNC for low latency)"""
-    
+
     # Layer 0: AI Icon detection (highest priority) - async
     has_icon, icon_name = await detect_ai_icon_async(image_path)
     if has_icon:
         return "AI ICON DETECTED ❌", 95.0, 0, f"Icon detected: '{icon_name}'"
-    
+
     # ENHANCED: Run all technical analyses in parallel
     ela_result = analyze_error_level_analysis(image_path)
     noise_result = analyze_noise_pattern(image_path)
     metadata_result = analyze_metadata(image_path)
     freq_result = analyze_frequency_domain(image_path)
-    
+
     # Check enhanced detections first
     if metadata_result.get("has_ai_metadata"):
         return "AI METADATA DETECTED ❌", 98.0, 0, f"AI software: {metadata_result.get('software', 'Unknown')}"
-    
+
     if ela_result["suspicious"] and noise_result["suspicious"]:
         return "MANIPULATION DETECTED ❌", 90.0, 0, "ELA + Noise anomalies"
-    
+
     img = Image.open(image_path).convert("RGB")
     tensor = preprocess(img).unsqueeze(0)
 
@@ -491,11 +491,11 @@ async def analyze_image_async(image_path):
     # Layer 2 & 3: Run face swap and Gemini in parallel for low latency
     face_analysis = detect_face_swap_opencv(image_path)
     gemini_result = await analyze_with_gemini_async(image_path)
-    
+
     gemini_fake = gemini_result["is_fake"]
     gemini_conf = gemini_result["confidence"] / 100.0
     gemini_indicators = gemini_result["indicators"]
-    
+
     # ENHANCED: Build comprehensive reason
     enhanced_indicators = []
     if ela_result["suspicious"]:
@@ -506,7 +506,7 @@ async def analyze_image_async(image_path):
         enhanced_indicators.append("frequency_anomaly")
     if not metadata_result.get("has_camera_info", True):
         enhanced_indicators.append("no_camera_metadata")
-    
+
     # Multi-layer decision with enhanced detection
     if model_confidence > 0.85 and model_label == "FAKE":
         final_label = "DEEPFAKE ❌"
