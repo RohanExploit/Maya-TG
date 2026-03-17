@@ -1,6 +1,7 @@
 torch
 torchvision
 gradio
+opencv-python-headless
 PyYAML
 Pillow
 numpy

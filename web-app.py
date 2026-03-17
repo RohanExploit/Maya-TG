@@ -5,6 +5,22 @@ from PIL import Image
 from torchvision.models import efficientnet_b0
 from torchvision import transforms
 import os
+import cv2
+
+# === Face Detection ===
+
+
+def detect_faces_opencv(image_path):
+    """Fast face detection using Haar Cascades"""
+    try:
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        return len(faces)
+    except:
+        return 0
 
 # === Load Model ===
 
