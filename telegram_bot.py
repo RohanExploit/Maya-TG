@@ -304,6 +304,69 @@ def detect_gan_fingerprint(image_path):
         return {"gan_score": 0, "suspicious": False}
 
 
+def detect_head_pose_inconsistency(image_path):
+    """ADDED: Head pose estimation for unnatural 3D positioning"""
+    if not MEDIAPIPE_AVAILABLE:
+        return {"inconsistent": False}
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"inconsistent": False}
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5) as face_mesh:
+            results = face_mesh.process(rgb_img)
+            if not results.multi_face_landmarks:
+                return {"inconsistent": False}
+            landmarks = results.multi_face_landmarks[0].landmark
+            nose_tip = np.array(
+                [landmarks[4].x, landmarks[4].y, landmarks[4].z])
+            chin = np.array(
+                [landmarks[152].x, landmarks[152].y, landmarks[152].z])
+            left_eye = np.array(
+                [landmarks[33].x, landmarks[33].y, landmarks[33].z])
+            right_eye = np.array(
+                [landmarks[263].x, landmarks[263].y, landmarks[263].z])
+            eye_vector = right_eye - left_eye
+            face_vector = chin - nose_tip
+            yaw = np.arctan2(eye_vector[0], eye_vector[2]) * 180 / np.pi
+            pitch = np.arctan2(face_vector[1], face_vector[2]) * 180 / np.pi
+            suspicious = abs(yaw) > 45 or abs(pitch) > 40
+            return {"inconsistent": suspicious, "pose": {"yaw": yaw, "pitch": pitch}, "suspicious": suspicious}
+    except:
+        return {"inconsistent": False, "suspicious": False}
+
+
+def detect_iris_inconsistency(image_path):
+    """ADDED: Detect unnatural iris patterns in deepfakes"""
+    if not MEDIAPIPE_AVAILABLE:
+        return {"inconsistent": False}
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"inconsistent": False}
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5) as face_mesh:
+            results = face_mesh.process(rgb_img)
+            if not results.multi_face_landmarks:
+                return {"inconsistent": False}
+            landmarks = results.multi_face_landmarks[0].landmark
+            h, w = img.shape[:2]
+            iris_issues = []
+            left_iris = (int(landmarks[468].x * w) if len(landmarks) > 468 else int(landmarks[33].x * w),
+                         int(landmarks[468].y * h) if len(landmarks) > 468 else int(landmarks[33].y * h))
+            right_iris = (int(landmarks[473].x * w) if len(landmarks) > 473 else int(landmarks[263].x * w),
+                          int(landmarks[473].y * h) if len(landmarks) > 473 else int(landmarks[263].y * h))
+            for ix, iy, name in [(left_iris[0], left_iris[1], "left"), (right_iris[0], right_iris[1], "right")]:
+                if 10 <= ix < w-10 and 10 <= iy < h-10:
+                    roi = gray[iy-10:iy+10, ix-10:ix+10]
+                    if roi.size > 0 and np.std(roi) < 10:
+                        iris_issues.append(f"unnatural_{name}_iris")
+            return {"inconsistent": len(iris_issues) > 0, "suspicious": len(iris_issues) > 0, "details": ", ".join(iris_issues) if iris_issues else "Normal"}
+    except:
+        return {"inconsistent": False, "suspicious": False}
+
+
 def detect_face_swap_mediapipe(image_path):
     """
     INTEGRATED: MediaPipe Face Mesh for precise face swap detection
@@ -788,9 +851,11 @@ async def analyze_image_async(image_path):
     model_confidence = conf.item()
     model_label = "FAKE" if pred.item() == 1 else "REAL"
 
-    # Layer 2, 3, 4 & 5: Run all face detection methods and Gemini in parallel
+    # Layer 2-7: Run all detection methods in parallel
     face_analysis = detect_face_swap_opencv(image_path)
     mediapipe_analysis = detect_face_swap_mediapipe(image_path)
+    head_pose = detect_head_pose_inconsistency(image_path)
+    iris_check = detect_iris_inconsistency(image_path)
     enhancement_analysis = detect_face_enhancement(image_path)
     gemini_result = await analyze_with_gemini_async(image_path)
 
@@ -816,6 +881,12 @@ async def analyze_image_async(image_path):
     elif gemini_fake and gemini_conf > 0.7:
         final_label = "AI-GENERATED ❌"
         reason = f"Gemini detected: {', '.join(gemini_indicators[:3])}"
+    elif head_pose["suspicious"]:
+        final_label = "UNNATURAL HEAD POSE ❌"
+        reason = f"Pose: yaw={head_pose['pose']['yaw']:.1f}, pitch={head_pose['pose']['pitch']:.1f}"
+    elif iris_check["suspicious"]:
+        final_label = "IRIS ANOMALY ❌"
+        reason = f"Iris issue: {iris_check['details']}"
     elif mediapipe_analysis["swapped"]:
         final_label = "FACE SWAP (MediaPipe) ❌"
         reason = f"Landmark analysis: {mediapipe_analysis['details']}"
