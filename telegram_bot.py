@@ -237,6 +237,64 @@ def analyze_frequency_domain(image_path):
         return {"freq_ratio": 1.0, "suspicious": False}
 
 
+def detect_copy_move_forgery(image_path):
+    """ADVANCED: Detect copy-move forgery using block matching"""
+    try:
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        block_size = 16
+        h, w = gray.shape
+        blocks = []
+        positions = []
+
+        for i in range(0, h - block_size, block_size // 2):
+            for j in range(0, w - block_size, block_size // 2):
+                block = gray[i:i+block_size, j:j+block_size]
+                dct = cv2.dct(np.float32(block))
+                feature = dct[:4, :4].flatten()
+                blocks.append(feature)
+                positions.append((i, j))
+
+        blocks = np.array(blocks)
+        from scipy.spatial.distance import cdist
+        distances = cdist(blocks, blocks, 'euclidean')
+
+        suspicious_pairs = 0
+        for i in range(len(distances)):
+            for j in range(i + 1, len(distances)):
+                if distances[i, j] < 0.1:
+                    pos1, pos2 = positions[i], positions[j]
+                    dist = np.sqrt((pos1[0] - pos2[0]) **
+                                   2 + (pos1[1] - pos2[1])**2)
+                    if dist > 50:
+                        suspicious_pairs += 1
+
+        is_forgery = suspicious_pairs > 5
+        return {"is_forgery": is_forgery, "suspicious": is_forgery}
+    except:
+        return {"is_forgery": False, "suspicious": False}
+
+
+def detect_gan_fingerprint(image_path):
+    """ADVANCED: Detect GAN fingerprints using GLCM texture analysis"""
+    try:
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray_small = cv2.resize(gray, (256, 256))
+
+        from skimage.feature import graycomatrix, graycoprops
+        glcm = graycomatrix(gray_small, distances=[1], angles=[0, np.pi/4, np.pi/2, 3*np.pi/4],
+                            levels=256, symmetric=True, normed=True)
+
+        contrast = graycoprops(glcm, 'contrast').mean()
+        correlation = graycoprops(glcm, 'correlation').mean()
+        gan_score = (contrast / 100) - correlation
+
+        return {"gan_score": gan_score, "suspicious": gan_score > 0.5}
+    except:
+        return {"gan_score": 0, "suspicious": False}
+
+
 def detect_face_enhancement(image_path):
     """
     Detect AI face enhancement/beautification:
@@ -584,15 +642,23 @@ async def analyze_image_async(image_path):
     if has_icon:
         return "AI ICON DETECTED ❌", 95.0, 0, f"Icon detected: '{icon_name}'"
 
-    # ENHANCED: Run all technical analyses in parallel
+    # ADVANCED: Run all technical analyses in parallel
     ela_result = analyze_error_level_analysis(image_path)
     noise_result = analyze_noise_pattern(image_path)
     metadata_result = analyze_metadata(image_path)
     freq_result = analyze_frequency_domain(image_path)
+    copy_move_result = detect_copy_move_forgery(image_path)
+    gan_result = detect_gan_fingerprint(image_path)
 
-    # Check enhanced detections first
+    # Check advanced detections first
     if metadata_result.get("has_ai_metadata"):
         return "AI METADATA DETECTED ❌", 98.0, 0, f"AI software: {metadata_result.get('software', 'Unknown')}"
+
+    if copy_move_result["suspicious"]:
+        return "COPY-MOVE FORGERY ❌", 95.0, 0, "Cloned regions detected"
+
+    if gan_result["suspicious"]:
+        return "GAN GENERATED ❌", 92.0, 0, f"GAN fingerprint score: {gan_result['gan_score']:.2f}"
 
     if ela_result["suspicious"] and noise_result["suspicious"]:
         return "MANIPULATION DETECTED ❌", 90.0, 0, "ELA + Noise anomalies"
