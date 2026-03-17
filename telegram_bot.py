@@ -237,6 +237,127 @@ def analyze_frequency_domain(image_path):
         return {"freq_ratio": 1.0, "suspicious": False}
 
 
+def detect_face_enhancement(image_path):
+    """
+    Detect AI face enhancement/beautification:
+    - Skin smoothing
+    - Teeth whitening
+    - Eye enlargement
+    - Jawline modification
+    - Lip enhancement
+    - Unnatural skin tone uniformity
+    """
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"enhanced": False, "indicators": []}
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+        # Load face and feature detectors
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+
+        if len(faces) == 0:
+            return {"enhanced": False, "indicators": []}
+
+        enhancement_indicators = []
+
+        for (x, y, w, h) in faces:
+            face_roi = img[y:y+h, x:x+w]
+            face_gray = gray[y:y+h, x:x+w]
+            face_hsv = hsv[y:y+h, x:x+w]
+
+            # Check 1: Skin Smoothing Detection
+            # Measure texture detail using Laplacian variance
+            laplacian_var = cv2.Laplacian(face_gray, cv2.CV_64F).var()
+
+            # Very low variance indicates excessive smoothing
+            if laplacian_var < 50:
+                enhancement_indicators.append("excessive_skin_smoothing")
+
+            # Check 2: Skin Tone Uniformity (unnatural)
+            # Extract skin region using HSV
+            lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+            upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+            skin_mask = cv2.inRange(face_hsv, lower_skin, upper_skin)
+
+            # Calculate skin color variance
+            skin_pixels = face_hsv[skin_mask > 0]
+            if len(skin_pixels) > 100:
+                skin_std = np.std(skin_pixels[:, 1])  # Saturation variance
+                if skin_std < 15:
+                    enhancement_indicators.append("unnatural_skin_uniformity")
+
+            # Check 3: Jawline Sharpness Analysis
+            # Detect edges around lower face
+            lower_face = face_gray[int(h*0.6):, :]
+            edges = cv2.Canny(lower_face, 50, 150)
+            edge_density = np.sum(edges > 0) / edges.size
+
+            # Unnaturally sharp jawline
+            if edge_density > 0.15:
+                enhancement_indicators.append("unnatural_jawline")
+
+            # Check 4: Eye Region Analysis
+            eye_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + 'haarcascade_eye.xml')
+            eyes = eye_cascade.detectMultiScale(face_gray, 1.1, 3)
+
+            if len(eyes) >= 2:
+                # Check eye brightness (whitening detection)
+                for (ex, ey, ew, eh) in eyes[:2]:
+                    eye_roi = face_gray[ey:ey+eh, ex:ex+ew]
+                    eye_brightness = np.mean(eye_roi)
+
+                    # Unnaturally bright eyes (whitened)
+                    if eye_brightness > 200:
+                        enhancement_indicators.append("eye_whitening_detected")
+                        break
+
+                # Check eye size relative to face
+                eye_areas = [ew * eh for (ex, ey, ew, eh) in eyes[:2]]
+                avg_eye_area = np.mean(eye_areas)
+                face_area = w * h
+                eye_to_face_ratio = avg_eye_area / face_area
+
+                # Unnaturally large eyes
+                if eye_to_face_ratio > 0.045:
+                    enhancement_indicators.append("eye_enlargement")
+
+            # Check 5: Lip Enhancement Detection
+            # Lower face region for lips
+            lower_face_region = face_hsv[int(
+                h*0.65):int(h*0.9), int(w*0.25):int(w*0.75)]
+            if lower_face_region.size > 0:
+                # Check for high saturation (enhanced lip color)
+                mean_saturation = np.mean(lower_face_region[:, :, 1])
+                if mean_saturation > 180:
+                    enhancement_indicators.append("lip_enhancement")
+
+            # Check 6: Overall Face Contrast
+            # Enhanced faces often have unnatural contrast
+            face_lab = cv2.cvtColor(face_roi, cv2.COLOR_BGR2LAB)
+            l_channel = face_lab[:, :, 0]
+            contrast = np.std(l_channel)
+
+            if contrast > 60:
+                enhancement_indicators.append("unnatural_contrast")
+
+        # Remove duplicates
+        enhancement_indicators = list(set(enhancement_indicators))
+
+        return {
+            "enhanced": len(enhancement_indicators) >= 2,
+            "indicators": enhancement_indicators,
+            "details": ", ".join(enhancement_indicators) if enhancement_indicators else "No enhancement detected"
+        }
+    except Exception as e:
+        return {"enhanced": False, "indicators": [], "details": f"Error: {str(e)}"}
+
+
 async def detect_ai_icon_async(image_path):
     """
     Detect AI tool icons/logos in image using Gemini Vision (ASYNC for low latency)
@@ -488,8 +609,9 @@ async def analyze_image_async(image_path):
     model_confidence = conf.item()
     model_label = "FAKE" if pred.item() == 1 else "REAL"
 
-    # Layer 2 & 3: Run face swap and Gemini in parallel for low latency
+    # Layer 2, 3 & 4: Run face swap, enhancement detection and Gemini in parallel
     face_analysis = detect_face_swap_opencv(image_path)
+    enhancement_analysis = detect_face_enhancement(image_path)
     gemini_result = await analyze_with_gemini_async(image_path)
 
     gemini_fake = gemini_result["is_fake"]
@@ -517,6 +639,9 @@ async def analyze_image_async(image_path):
     elif face_analysis["suspicious"] and model_label == "FAKE":
         final_label = "FACE SWAP ❌"
         reason = f"Face swap detected: {face_analysis['details']}"
+    elif enhancement_analysis["enhanced"]:
+        final_label = "FACE ENHANCED ❌"
+        reason = f"Beautification: {enhancement_analysis['details']}"
     elif len(enhanced_indicators) >= 2:
         final_label = "MANIPULATED ❌"
         reason = f"Technical: {', '.join(enhanced_indicators[:2])}"
@@ -529,6 +654,9 @@ async def analyze_image_async(image_path):
     elif face_analysis["suspicious"]:
         final_label = "SUSPICIOUS ⚠️"
         reason = f"Anomalies: {face_analysis['details']}"
+    elif enhancement_analysis["indicators"]:
+        final_label = "SUSPICIOUS ⚠️"
+        reason = f"Possible enhancement: {enhancement_analysis['details']}"
     elif gemini_fake:
         final_label = "SUSPICIOUS ⚠️"
         reason = f"Gemini flags: {', '.join(gemini_indicators[:2])}"
