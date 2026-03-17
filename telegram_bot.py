@@ -77,46 +77,47 @@ def detect_face_swap_opencv(image_path):
     try:
         img = cv2.imread(image_path)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
+
         # Load classifiers
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
         # Detect faces
         faces = face_cascade.detectMultiScale(gray, 1.1, 4)
         face_count = len(faces)
-        
+
         if face_count == 0:
             return {"face_count": 0, "suspicious": False, "details": "No face detected"}
-        
+
         suspicious_indicators = []
-        
+
         for (x, y, w, h) in faces:
             # Extract face region
             face_roi = img[y:y+h, x:x+w]
             face_gray = gray[y:y+h, x:x+w]
-            
+
             # Check 1: Face edge sharpness (swapped faces often have blur at edges)
             edges = cv2.Canny(face_gray, 100, 200)
             edge_ratio = np.sum(edges > 0) / (w * h)
             if edge_ratio < 0.05:
                 suspicious_indicators.append("unnatural_face_edges")
-            
+
             # Check 2: Color consistency in face vs background
-            face_mean = np.mean(face_roi, axis=(0,1))
-            bg_roi = img[max(0,y-20):y, max(0,x-20):x+w+20]
+            face_mean = np.mean(face_roi, axis=(0, 1))
+            bg_roi = img[max(0, y-20):y, max(0, x-20):x+w+20]
             if bg_roi.size > 0:
-                bg_mean = np.mean(bg_roi, axis=(0,1))
+                bg_mean = np.mean(bg_roi, axis=(0, 1))
                 color_diff = np.abs(face_mean - bg_mean)
                 if np.mean(color_diff) > 60:
                     suspicious_indicators.append("color_mismatch")
-            
+
             # Check 3: Face aspect ratio (unnatural proportions)
             aspect_ratio = w / h
             if aspect_ratio < 0.7 or aspect_ratio > 0.95:
                 suspicious_indicators.append("unnatural_proportions")
-        
+
         is_suspicious = len(suspicious_indicators) >= 2
-        
+
         return {
             "face_count": face_count,
             "suspicious": is_suspicious,
@@ -140,10 +141,10 @@ def analyze_image(image_path):
 
     model_confidence = conf.item()
     model_label = "FAKE" if pred.item() == 1 else "REAL"
-    
+
     # Layer 2: Face swap detection
     face_analysis = detect_face_swap_opencv(image_path)
-    
+
     # Multi-layer decision
     if model_confidence > 0.85 and model_label == "FAKE":
         final_label = "DEEPFAKE ❌"
@@ -160,9 +161,9 @@ def analyze_image(image_path):
     else:
         final_label = "REAL ✅"
         reason = "No manipulation detected"
-    
+
     confidence = model_confidence * 100
-    
+
     return final_label, confidence, face_analysis["face_count"], reason
 
 
