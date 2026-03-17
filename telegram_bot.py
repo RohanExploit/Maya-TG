@@ -2,8 +2,13 @@ import asyncio
 import logging
 import os
 import tempfile
+import json
+import csv
+import time
 from io import BytesIO
 import base64
+from datetime import datetime
+from collections import defaultdict
 
 import torch
 import cv2
@@ -12,7 +17,7 @@ from PIL import Image, ExifTags
 from torchvision.models import efficientnet_b0
 from torchvision import transforms
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationTypes
 import google.generativeai as genai
 from scipy import fftpack
 from skimage import feature, measure
@@ -27,6 +32,12 @@ try:
     mp_face_detection = mp.solutions.face_detection
 except ImportError:
     MEDIAPIPE_AVAILABLE = False
+
+# User statistics and rate limiting
+user_stats = defaultdict(
+    lambda: {"total": 0, "fake": 0, "real": 0, "last_request": 0})
+rate_limit = {}  # user_id: last_request_time
+BATCH_MODE = {}  # user_id: [photo_file_ids]
 
 # Bot token
 TOKEN = "5614405588:AAEtmjQNR8cppePAxUxRIlcYzDOK4Y11ghc"
@@ -77,26 +88,187 @@ preprocess = transforms.Compose([
 ])
 
 
+def check_rate_limit(user_id):
+    """Check if user is rate limited"""
+    current_time = time.time()
+    if user_id in rate_limit:
+        if current_time - rate_limit[user_id] < 2:  # 2 second cooldown
+            return False
+    rate_limit[user_id] = current_time
+    return True
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     await update.message.reply_text(
-        "🧠 *Deepfake Detector Bot*\n\n"
-        "Send me an image or video and I'll analyze if it's real or fake.\n\n"
-        "Commands:\n"
-        "/start - Start the bot\n"
-        "/help - How to use",
+        f"🧠 *Deepfake Detector Bot*\n\n"
+        f"Welcome {user.first_name}!\n\n"
+        f"*14-Layer Detection System:*\n"
+        f"✅ AI Icon Detection\n"
+        f"✅ Metadata Analysis\n"
+        f"✅ Copy-Move Forgery\n"
+        f"✅ GAN Fingerprint\n"
+        f"✅ Head Pose Analysis\n"
+        f"✅ Iris Anomaly Detection\n"
+        f"✅ MediaPipe Face Mesh (468 landmarks)\n"
+        f"✅ Face Swap Detection\n"
+        f"✅ Face Enhancement Detection\n"
+        f"✅ Error Level Analysis\n"
+        f"✅ Noise Pattern Analysis\n"
+        f"✅ EfficientNet-B0 Model\n"
+        f"✅ Gemini AI Analysis\n"
+        f"✅ Frequency Domain Analysis\n\n"
+        f"Commands:\n"
+        f"/start - Start\n"
+        f"/help - Help\n"
+        f"/stats - Your statistics\n"
+        f"/batch - Batch analysis mode\n"
+        f"/export - Export results (JSON/CSV)",
         parse_mode='Markdown'
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📸 *Send any image or video*\n\n"
-        "I'll analyze it using EfficientNet-B0 and tell you if it's:\n"
-        "✅ Real\n"
-        "❌ Deepfake\n\n"
-        "Supported formats: JPG, PNG, MP4, MOV",
+        "📸 *Deepfake Detector - Full Fledged*\n\n"
+        "*Send:*\n"
+        "• Single image - Instant analysis\n"
+        "• Multiple images - Batch processing\n"
+        "• Video - Frame-by-frame analysis\n\n"
+        "*Commands:*\n"
+        "/stats - View your detection stats\n"
+        "/batch - Enable batch mode (send multiple photos)\n"
+        "/done - Finish batch and get report\n"
+        "/export - Export results to JSON or CSV\n"
+        "/reset - Reset your statistics\n\n"
+        "*Detection Types:*\n"
+        "❌ Deepfake\n"
+        "❌ Face Swap\n"
+        "❌ AI Generated\n"
+        "❌ Face Enhanced\n"
+        "❌ Copy-Move Forgery\n"
+        "❌ GAN Generated\n"
+        "❌ Manipulated\n"
+        "✅ Real",
         parse_mode='Markdown'
     )
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user statistics"""
+    user_id = update.effective_user.id
+    stats = user_stats[user_id]
+
+    total = stats["total"]
+    fake = stats["fake"]
+    real = stats["real"]
+    fake_rate = (fake / total * 100) if total > 0 else 0
+
+    await update.message.reply_text(
+        f"📊 *Your Statistics*\n\n"
+        f"Total Analyzed: {total}\n"
+        f"❌ Fake/AI: {fake}\n"
+        f"✅ Real: {real}\n"
+        f"📈 Fake Detection Rate: {fake_rate:.1f}%",
+        parse_mode='Markdown'
+    )
+
+
+async def batch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Enable batch processing mode"""
+    user_id = update.effective_user.id
+    BATCH_MODE[user_id] = []
+    await update.message.reply_text(
+        "📁 *Batch Mode Enabled*\n\n"
+        "Send me multiple images one by one.\n"
+        "When done, type /done to get full report.\n\n"
+        "Send /cancel to exit batch mode."
+    )
+
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process batch and generate report"""
+    user_id = update.effective_user.id
+
+    if user_id not in BATCH_MODE or not BATCH_MODE[user_id]:
+        await update.message.reply_text("No images in batch. Send /batch to start.")
+        return
+
+    photos = BATCH_MODE[user_id]
+    await update.message.reply_text(f"🔍 Processing {len(photos)} images...")
+
+    results = []
+    for i, photo_file_id in enumerate(photos, 1):
+        try:
+            file = await context.bot.get_file(photo_file_id)
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                await file.download_to_drive(tmp.name)
+                label, confidence, face_count, reason = await analyze_image_async(tmp.name)
+                results.append({
+                    "image": f"Image {i}",
+                    "result": label,
+                    "confidence": confidence,
+                    "faces": face_count,
+                    "reason": reason
+                })
+                os.unlink(tmp.name)
+        except Exception as e:
+            results.append(
+                {"image": f"Image {i}", "result": "Error", "error": str(e)})
+
+    # Generate report
+    report = "📊 *Batch Analysis Report*\n\n"
+    fake_count = sum(1 for r in results if "❌" in r.get("result", ""))
+
+    for r in results:
+        if "error" in r:
+            report += f"❓ {r['image']}: Error\n"
+        else:
+            report += f"{r['image']}: {r['result']}\n"
+
+    report += f"\n📈 Summary: {fake_count}/{len(results)} flagged"
+
+    await update.message.reply_text(report, parse_mode='Markdown')
+    del BATCH_MODE[user_id]
+
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export user statistics to JSON or CSV"""
+    user_id = update.effective_user.id
+    stats = user_stats[user_id]
+
+    # Create JSON export
+    export_data = {
+        "user_id": user_id,
+        "export_date": datetime.now().isoformat(),
+        "statistics": dict(stats),
+        "detection_history": []  # Could store history if implemented
+    }
+
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump(export_data, f, indent=2)
+        json_path = f.name
+
+    # Send file
+    with open(json_path, 'rb') as f:
+        await update.message.reply_document(f, filename=f"detection_stats_{user_id}.json")
+
+    os.unlink(json_path)
+
+    # Also create CSV
+    csv_path = json_path.replace('.json', '.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Analyzed', stats['total']])
+        writer.writerow(['Fake Detected', stats['fake']])
+        writer.writerow(['Real Detected', stats['real']])
+
+    with open(csv_path, 'rb') as f:
+        await update.message.reply_document(f, filename=f"detection_stats_{user_id}.csv")
+
+    os.unlink(csv_path)
 
 
 # === ENHANCED DETECTION FUNCTIONS ===
@@ -949,11 +1121,26 @@ def analyze_video(video_path):
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle image uploads with low latency async analysis"""
-    await update.message.reply_text("🔍 Analyzing image...")
+    """Handle image uploads with full-fledged features"""
+    user_id = update.effective_user.id
+
+    # Check rate limit
+    if not check_rate_limit(user_id):
+        await update.message.reply_text("⏱️ Please wait a moment before sending another image.")
+        return
+
+    # Check if in batch mode
+    if user_id in BATCH_MODE:
+        photo = update.message.photo[-1]
+        BATCH_MODE[user_id].append(photo.file_id)
+        count = len(BATCH_MODE[user_id])
+        await update.message.reply_text(f"📸 Added to batch ({count} images). Send more or type /done")
+        return
+
+    await update.message.reply_text("🔍 Analyzing with 14-layer detection...")
 
     # Get photo
-    photo = update.message.photo[-1]  # Get highest quality
+    photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
 
     # Download to temp file
@@ -962,20 +1149,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tmp_path = tmp.name
 
     try:
-        # Analyze with async multi-layer detection (LOW LATENCY)
+        # Analyze with async multi-layer detection
+        start_time = time.time()
         label, confidence, face_count, reason = await analyze_image_async(tmp_path)
+        analysis_time = time.time() - start_time
 
-        # Send result
+        # Update user statistics
+        user_stats[user_id]["total"] += 1
+        if "❌" in label:
+            user_stats[user_id]["fake"] += 1
+        else:
+            user_stats[user_id]["real"] += 1
+        user_stats[user_id]["last_request"] = time.time()
+
+        # Send result with full details
         result_text = (
-            f"🧠 *Analysis Result*\n\n"
-            f"📊 Prediction: *{label}*\n"
+            f"🧠 *Analysis Complete*\n\n"
+            f"📊 Result: *{label}*\n"
             f"🎯 Confidence: *{confidence:.1f}%*\n"
-            f"👤 Faces: *{face_count}*\n"
+            f"👤 Faces Detected: *{face_count}*\n"
+            f"⏱️ Analysis Time: *{analysis_time:.2f}s*\n"
             f"📝 Reason: {reason}\n\n"
-            f"Multi-layer: EfficientNet + Gemini + Face Analysis"
+            f"📈 Your Stats: {user_stats[user_id]['total']} analyzed\n"
+            f"Use /stats for full statistics"
         )
         await update.message.reply_text(result_text, parse_mode='Markdown')
 
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error during analysis: {str(e)}")
     finally:
         os.unlink(tmp_path)
 
@@ -1054,9 +1255,15 @@ def main():
     # Create application
     application = Application.builder().token(TOKEN).build()
 
-    # Add handlers
+    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("batch", batch_command))
+    application.add_handler(CommandHandler("done", done_command))
+    application.add_handler(CommandHandler("export", export_command))
+
+    # Add message handlers
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.VIDEO, handle_video))
     application.add_handler(MessageHandler(
@@ -1064,7 +1271,7 @@ def main():
     application.add_error_handler(error_handler)
 
     # Run
-    logger.info("Bot started!")
+    logger.info("Bot started! Full-fledged mode active.")
     application.run_polling()
 
 
