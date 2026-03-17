@@ -19,6 +19,15 @@ from skimage import feature, measure
 import warnings
 warnings.filterwarnings('ignore')
 
+# MediaPipe for advanced face detection
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+    mp_face_mesh = mp.solutions.face_mesh
+    mp_face_detection = mp.solutions.face_detection
+except ImportError:
+    MEDIAPIPE_AVAILABLE = False
+
 # Bot token
 TOKEN = "5614405588:AAEtmjQNR8cppePAxUxRIlcYzDOK4Y11ghc"
 
@@ -293,6 +302,110 @@ def detect_gan_fingerprint(image_path):
         return {"gan_score": gan_score, "suspicious": gan_score > 0.5}
     except:
         return {"gan_score": 0, "suspicious": False}
+
+
+def detect_face_swap_mediapipe(image_path):
+    """
+    INTEGRATED: MediaPipe Face Mesh for precise face swap detection
+    Detects facial landmark inconsistencies common in deepfakes
+    """
+    if not MEDIAPIPE_AVAILABLE:
+        return {"swapped": False, "indicators": [], "face_count": 0}
+
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"swapped": False, "indicators": [], "face_count": 0}
+
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w = img.shape[:2]
+
+        swap_indicators = []
+        face_count = 0
+
+        # Initialize Face Mesh
+        with mp_face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=10,
+            min_detection_confidence=0.5
+        ) as face_mesh:
+
+            results = face_mesh.process(rgb_img)
+
+            if results.multi_face_landmarks:
+                face_count = len(results.multi_face_landmarks)
+
+                for face_landmarks in results.multi_face_landmarks:
+                    landmarks = face_landmarks.landmark
+
+                    # Check 1: Face boundary consistency
+                    # Get face boundary points
+                    face_boundary = [landmarks[i]
+                                     # Sample boundary
+                                     for i in range(0, 468, 4)]
+                    x_coords = [p.x for p in face_boundary]
+                    y_coords = [p.y for p in face_boundary]
+
+                    # Check aspect ratio consistency
+                    face_width = max(x_coords) - min(x_coords)
+                    face_height = max(y_coords) - min(y_coords)
+                    aspect_ratio = face_width / face_height if face_height > 0 else 0
+
+                    if aspect_ratio < 0.6 or aspect_ratio > 1.0:
+                        swap_indicators.append("unnatural_face_shape")
+
+                    # Check 2: Eye symmetry and positioning
+                    left_eye = [landmarks[i]
+                                for i in [33, 133, 157, 158, 159, 160, 161, 246]]
+                    right_eye = [landmarks[i]
+                                 for i in [362, 263, 384, 385, 386, 387, 388, 466]]
+
+                    left_eye_y = np.mean([p.y for p in left_eye])
+                    right_eye_y = np.mean([p.y for p in right_eye])
+                    eye_level_diff = abs(left_eye_y - right_eye_y)
+
+                    if eye_level_diff < 0.005:  # Too perfectly aligned
+                        swap_indicators.append("unnatural_eye_symmetry")
+
+                    # Check 3: Mouth to eye distance consistency
+                    mouth_top = landmarks[13].y
+                    mouth_bottom = landmarks[14].y
+                    mouth_height = abs(mouth_bottom - mouth_top)
+
+                    nose_tip = landmarks[4].y
+                    eye_level = (left_eye_y + right_eye_y) / 2
+                    nose_to_eye = abs(nose_tip - eye_level)
+
+                    # Unnatural proportions
+                    if nose_to_eye / mouth_height > 2.0 if mouth_height > 0 else False:
+                        swap_indicators.append("unnatural_facial_proportions")
+
+                    # Check 4: Jawline smoothness (swapped faces often have irregular jawlines)
+                    jaw_points = [landmarks[i] for i in [
+                        234, 93, 132, 58, 172, 136, 150, 149, 176, 148]]
+                    jaw_x = [p.x for p in jaw_points]
+                    jaw_y = [p.y for p in jaw_points]
+
+                    # Calculate curvature consistency
+                    if len(jaw_x) > 2:
+                        jaw_curve = np.polyfit(jaw_x, jaw_y, 2)
+                        curve_variance = np.var(
+                            [y - np.polyval(jaw_curve, x) for x, y in zip(jaw_x, jaw_y)])
+
+                        if curve_variance > 0.01:
+                            swap_indicators.append("irregular_jawline")
+
+        # Remove duplicates
+        swap_indicators = list(set(swap_indicators))
+
+        return {
+            "swapped": len(swap_indicators) >= 2,
+            "indicators": swap_indicators,
+            "face_count": face_count,
+            "details": ", ".join(swap_indicators) if swap_indicators else "Normal"
+        }
+    except Exception as e:
+        return {"swapped": False, "indicators": [], "face_count": 0, "details": f"Error: {str(e)}"}
 
 
 def detect_face_enhancement(image_path):
@@ -675,8 +788,9 @@ async def analyze_image_async(image_path):
     model_confidence = conf.item()
     model_label = "FAKE" if pred.item() == 1 else "REAL"
 
-    # Layer 2, 3 & 4: Run face swap, enhancement detection and Gemini in parallel
+    # Layer 2, 3, 4 & 5: Run all face detection methods and Gemini in parallel
     face_analysis = detect_face_swap_opencv(image_path)
+    mediapipe_analysis = detect_face_swap_mediapipe(image_path)
     enhancement_analysis = detect_face_enhancement(image_path)
     gemini_result = await analyze_with_gemini_async(image_path)
 
@@ -702,6 +816,9 @@ async def analyze_image_async(image_path):
     elif gemini_fake and gemini_conf > 0.7:
         final_label = "AI-GENERATED ❌"
         reason = f"Gemini detected: {', '.join(gemini_indicators[:3])}"
+    elif mediapipe_analysis["swapped"]:
+        final_label = "FACE SWAP (MediaPipe) ❌"
+        reason = f"Landmark analysis: {mediapipe_analysis['details']}"
     elif face_analysis["suspicious"] and model_label == "FAKE":
         final_label = "FACE SWAP ❌"
         reason = f"Face swap detected: {face_analysis['details']}"

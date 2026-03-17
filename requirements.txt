@@ -2,10 +2,12 @@ torch
 torchvision
 gradio
 opencv-python-headless
+opencv-contrib-python-headless
 PyYAML
 Pillow
 numpy
 scipy
 scikit-image
+mediapipe
 python-telegram-bot==20.7
 google-generativeai
