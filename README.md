@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ---
 title: Deepfake Detector
 emoji: 🧠
@@ -326,3 +327,6 @@ This project is licensed under the **MIT License**.
 ---
 
 ⭐ **Star this repository if you found it helpful!**
+=======
+# Maya-TG
+>>>>>>> 0ab1e87495118c779be47d81c9891c56e56a6665

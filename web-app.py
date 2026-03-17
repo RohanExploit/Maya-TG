@@ -2,7 +2,6 @@ import gradio as gr
 import torch
 import mimetypes
 from PIL import Image
-import cv2
 from torchvision.models import efficientnet_b0
 from torchvision import transforms
 import os
@@ -70,17 +69,29 @@ def predict_file(file_obj):
         """)
 
     elif mime and mime.startswith("video"):
-        cap = cv2.VideoCapture(path)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
+        # For video, extract first frame using PIL
+        try:
+            import subprocess
+            import tempfile
+
+            # Use ffmpeg to extract first frame
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                cmd = ['ffmpeg', '-i', path, '-ss', '00:00:00',
+                       '-vframes', '1', tmp.name, '-y']
+                subprocess.run(cmd, capture_output=True, timeout=10)
+
+                if os.path.exists(tmp.name) and os.path.getsize(tmp.name) > 0:
+                    img = Image.open(tmp.name).convert("RGB")
+                    os.unlink(tmp.name)
+                else:
+                    raise Exception("Could not extract frame")
+        except:
             return "Error", "0%", None, gr.update(visible=True, value="""
                 <div style="background: #374151; border-radius: 12px; padding: 20px; text-align: center; border: 2px solid #ef4444;">
                     <div style="font-size: 24px; color: #ef4444;">Error reading video</div>
                 </div>
             """)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(frame)
+
         tensor = preprocess(img).unsqueeze(0)
         with torch.no_grad():
             out = model(tensor)
@@ -284,11 +295,6 @@ with gr.Blocks(title="Deepfake Detector", css=custom_css) as demo:
     """)
 
     # Event handlers
-    def on_file_change(file_obj):
-        if file_obj is None:
-            return [gr.update(visible=False)] * 5
-        return [gr.update(visible=True), gr.update(visible=False), None, None, gr.update(visible=False)]
-
     def handle_input(file_obj):
         pred, conf, img, result = predict_file(file_obj)
         return pred, conf, img, gr.update(visible=False), result
