@@ -8,12 +8,16 @@ import base64
 import torch
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ExifTags
 from torchvision.models import efficientnet_b0
 from torchvision import transforms
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
+from scipy import fftpack
+from skimage import feature, measure
+import warnings
+warnings.filterwarnings('ignore')
 
 # Bot token
 TOKEN = "5614405588:AAEtmjQNR8cppePAxUxRIlcYzDOK4Y11ghc"
@@ -84,6 +88,153 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Supported formats: JPG, PNG, MP4, MOV",
         parse_mode='Markdown'
     )
+
+
+# === ENHANCED DETECTION FUNCTIONS ===
+
+def analyze_error_level_analysis(image_path):
+    """
+    Error Level Analysis (ELA) - detects manipulated regions
+    Different compression levels indicate tampering
+    """
+    try:
+        img = Image.open(image_path)
+        # Save at known quality and compare
+        temp_buffer = BytesIO()
+        img.save(temp_buffer, format='JPEG', quality=90)
+        temp_buffer.seek(0)
+        recompressed = Image.open(temp_buffer)
+
+        # Calculate difference
+        original_array = np.array(img).astype(float)
+        recompressed_array = np.array(recompressed).astype(float)
+
+        if original_array.shape != recompressed_array.shape:
+            return {"ela_score": 0, "suspicious": False}
+
+        # Error level
+        ela = np.abs(original_array - recompressed_array)
+        ela_score = np.mean(ela)
+
+        # High ELA indicates manipulation
+        return {
+            "ela_score": ela_score,
+            "suspicious": ela_score > 15.0
+        }
+    except:
+        return {"ela_score": 0, "suspicious": False}
+
+
+def analyze_noise_pattern(image_path):
+    """
+    Analyze noise patterns - AI images often have different noise characteristics
+    """
+    try:
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Extract noise using high-pass filter
+        noise = cv2.subtract(gray, cv2.GaussianBlur(gray, (3, 3), 0))
+
+        # Calculate noise statistics
+        noise_mean = np.mean(noise)
+        noise_std = np.std(noise)
+
+        # AI images often have uniform or patterned noise
+        noise_uniformity = np.std(noise[::4, ::4])  # Sample every 4th pixel
+
+        # Check for unnatural noise patterns
+        suspicious = (
+            noise_std < 2.0 or  # Too little noise
+            noise_std > 25.0 or  # Too much noise
+            noise_uniformity < 0.5  # Too uniform
+        )
+
+        return {
+            "noise_std": noise_std,
+            "noise_uniformity": noise_uniformity,
+            "suspicious": suspicious
+        }
+    except:
+        return {"noise_std": 0, "noise_uniformity": 0, "suspicious": False}
+
+
+def analyze_metadata(image_path):
+    """
+    Check image metadata for signs of AI generation or manipulation
+    """
+    try:
+        img = Image.open(image_path)
+        metadata = {}
+
+        # Check for EXIF data
+        try:
+            exif = img._getexif()
+            if exif:
+                for tag_id, value in exif.items():
+                    tag = ExifTags.TAGS.get(tag_id, tag_id)
+                    metadata[tag] = value
+        except:
+            pass
+
+        # Check for software tags indicating AI tools
+        ai_software_keywords = [
+            'midjourney', 'dalle', 'dall-e', 'stable diffusion',
+            'firefly', 'leonardo', 'bing', 'craiyon', 'nightcafe'
+        ]
+
+        software_info = str(metadata.get('Software', '')).lower()
+        maker_info = str(metadata.get('Make', '')).lower()
+
+        for keyword in ai_software_keywords:
+            if keyword in software_info or keyword in maker_info:
+                return {"has_ai_metadata": True, "software": metadata.get('Software', 'Unknown')}
+
+        # Check if image lacks camera metadata (common in AI images)
+        has_camera_info = any(k in metadata for k in [
+                              'Make', 'Model', 'LensModel', 'FNumber'])
+
+        return {
+            "has_ai_metadata": False,
+            "has_camera_info": has_camera_info,
+            "suspicious": not has_camera_info  # No camera info is suspicious
+        }
+    except:
+        return {"has_ai_metadata": False, "suspicious": False}
+
+
+def analyze_frequency_domain(image_path):
+    """
+    FFT analysis - AI images often have different frequency characteristics
+    """
+    try:
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+        # Apply FFT
+        f_transform = fftpack.fft2(img)
+        f_shift = fftpack.fftshift(f_transform)
+        magnitude = np.abs(f_shift)
+
+        # Analyze frequency distribution
+        h, w = magnitude.shape
+        center_h, center_w = h // 2, w // 2
+
+        # Low vs high frequency ratio
+        low_freq = np.mean(
+            magnitude[center_h-10:center_h+10, center_w-10:center_w+10])
+        high_freq = np.mean(magnitude) - low_freq
+
+        ratio = low_freq / (high_freq + 1e-7)
+
+        # AI images often have different frequency distributions
+        suspicious = ratio > 5.0 or ratio < 0.5
+
+        return {
+            "freq_ratio": ratio,
+            "suspicious": suspicious
+        }
+    except:
+        return {"freq_ratio": 1.0, "suspicious": False}
 
 
 async def detect_ai_icon_async(image_path):
@@ -305,13 +456,26 @@ def detect_face_swap_opencv(image_path):
 
 
 async def analyze_image_async(image_path):
-    """Analyze image with multi-layer approach + Gemini + Icon Detection (ASYNC for low latency)"""
-
+    """Analyze image with ENHANCED multi-layer approach (ASYNC for low latency)"""
+    
     # Layer 0: AI Icon detection (highest priority) - async
     has_icon, icon_name = await detect_ai_icon_async(image_path)
     if has_icon:
         return "AI ICON DETECTED ❌", 95.0, 0, f"Icon detected: '{icon_name}'"
-
+    
+    # ENHANCED: Run all technical analyses in parallel
+    ela_result = analyze_error_level_analysis(image_path)
+    noise_result = analyze_noise_pattern(image_path)
+    metadata_result = analyze_metadata(image_path)
+    freq_result = analyze_frequency_domain(image_path)
+    
+    # Check enhanced detections first
+    if metadata_result.get("has_ai_metadata"):
+        return "AI METADATA DETECTED ❌", 98.0, 0, f"AI software: {metadata_result.get('software', 'Unknown')}"
+    
+    if ela_result["suspicious"] and noise_result["suspicious"]:
+        return "MANIPULATION DETECTED ❌", 90.0, 0, "ELA + Noise anomalies"
+    
     img = Image.open(image_path).convert("RGB")
     tensor = preprocess(img).unsqueeze(0)
 
@@ -327,12 +491,23 @@ async def analyze_image_async(image_path):
     # Layer 2 & 3: Run face swap and Gemini in parallel for low latency
     face_analysis = detect_face_swap_opencv(image_path)
     gemini_result = await analyze_with_gemini_async(image_path)
-
+    
     gemini_fake = gemini_result["is_fake"]
     gemini_conf = gemini_result["confidence"] / 100.0
     gemini_indicators = gemini_result["indicators"]
-
-    # Multi-layer decision with Gemini
+    
+    # ENHANCED: Build comprehensive reason
+    enhanced_indicators = []
+    if ela_result["suspicious"]:
+        enhanced_indicators.append("compression_anomaly")
+    if noise_result["suspicious"]:
+        enhanced_indicators.append("unnatural_noise")
+    if freq_result["suspicious"]:
+        enhanced_indicators.append("frequency_anomaly")
+    if not metadata_result.get("has_camera_info", True):
+        enhanced_indicators.append("no_camera_metadata")
+    
+    # Multi-layer decision with enhanced detection
     if model_confidence > 0.85 and model_label == "FAKE":
         final_label = "DEEPFAKE ❌"
         reason = "High confidence AI detection"
@@ -342,6 +517,12 @@ async def analyze_image_async(image_path):
     elif face_analysis["suspicious"] and model_label == "FAKE":
         final_label = "FACE SWAP ❌"
         reason = f"Face swap detected: {face_analysis['details']}"
+    elif len(enhanced_indicators) >= 2:
+        final_label = "MANIPULATED ❌"
+        reason = f"Technical: {', '.join(enhanced_indicators[:2])}"
+    elif ela_result["suspicious"]:
+        final_label = "SUSPICIOUS ⚠️"
+        reason = "Error level analysis indicates tampering"
     elif model_confidence > 0.7 and model_label == "FAKE":
         final_label = "SUSPICIOUS ⚠️"
         reason = "Possible manipulation"

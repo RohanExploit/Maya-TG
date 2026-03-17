@@ -6,5 +6,6 @@ PyYAML
 Pillow
 numpy
 scipy
+scikit-image
 python-telegram-bot==20.7
 google-generativeai
