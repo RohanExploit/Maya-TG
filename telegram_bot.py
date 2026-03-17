@@ -3,6 +3,7 @@ import logging
 import os
 import tempfile
 from io import BytesIO
+import base64
 
 import torch
 import cv2
@@ -12,9 +13,17 @@ from torchvision.models import efficientnet_b0
 from torchvision import transforms
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import google.generativeai as genai
 
 # Bot token
 TOKEN = "5614405588:AAEtmjQNR8cppePAxUxRIlcYzDOK4Y11ghc"
+
+# Gemini API
+GEMINI_API_KEY = "AIzaSyAbkpCTBDcTqBdY-aF6Qbo7wPwd8Rw4KNU"
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Initialize Gemini model
+gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Setup logging
 logging.basicConfig(
@@ -65,6 +74,56 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Supported formats: JPG, PNG, MP4, MOV",
         parse_mode='Markdown'
     )
+
+
+def analyze_with_gemini(image_path):
+    """
+    Use Gemini Vision API to analyze image for deepfake indicators
+    """
+    try:
+        # Load and encode image
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
+
+        # Create prompt for Gemini
+        prompt = """
+        Analyze this image for signs of being AI-generated or manipulated (deepfake).
+        Look for:
+        1. Unnatural skin textures or smoothing
+        2. Inconsistent lighting on face
+        3. Weird eyes, teeth, or hair
+        4. Blurry or distorted background
+        5. Unnatural facial proportions
+        
+        Respond with ONLY a JSON object in this format:
+        {"is_fake": true/false, "confidence": 0-100, "indicators": ["list", "of", "issues"]}
+        """
+
+        # Generate response
+        response = gemini_model.generate_content(
+            [prompt, {"mime_type": "image/jpeg", "data": image_data}]
+        )
+
+        # Parse response
+        try:
+            import json
+            result_text = response.text.strip()
+            # Extract JSON if wrapped in markdown
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0]
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0]
+
+            result = json.loads(result_text.strip())
+            return {
+                "is_fake": result.get("is_fake", False),
+                "confidence": result.get("confidence", 50),
+                "indicators": result.get("indicators", [])
+            }
+        except:
+            return {"is_fake": False, "confidence": 50, "indicators": ["Analysis error"]}
+    except Exception as e:
+        return {"is_fake": False, "confidence": 50, "indicators": [f"Error: {str(e)}"]}
 
 
 def detect_face_swap_opencv(image_path):
@@ -129,7 +188,7 @@ def detect_face_swap_opencv(image_path):
 
 
 def analyze_image(image_path):
-    """Analyze image for deepfake detection with multi-layer approach"""
+    """Analyze image for deepfake detection with multi-layer approach + Gemini"""
     img = Image.open(image_path).convert("RGB")
     tensor = preprocess(img).unsqueeze(0)
 
@@ -144,11 +203,20 @@ def analyze_image(image_path):
 
     # Layer 2: Face swap detection
     face_analysis = detect_face_swap_opencv(image_path)
+    
+    # Layer 3: Gemini AI analysis
+    gemini_result = analyze_with_gemini(image_path)
+    gemini_fake = gemini_result["is_fake"]
+    gemini_conf = gemini_result["confidence"] / 100.0
+    gemini_indicators = gemini_result["indicators"]
 
-    # Multi-layer decision
+    # Multi-layer decision with Gemini
     if model_confidence > 0.85 and model_label == "FAKE":
         final_label = "DEEPFAKE ❌"
         reason = "High confidence AI detection"
+    elif gemini_fake and gemini_conf > 0.7:
+        final_label = "AI-GENERATED ❌"
+        reason = f"Gemini detected: {', '.join(gemini_indicators[:3])}"
     elif face_analysis["suspicious"] and model_label == "FAKE":
         final_label = "FACE SWAP ❌"
         reason = f"Face swap detected: {face_analysis['details']}"
@@ -158,6 +226,9 @@ def analyze_image(image_path):
     elif face_analysis["suspicious"]:
         final_label = "SUSPICIOUS ⚠️"
         reason = f"Anomalies: {face_analysis['details']}"
+    elif gemini_fake:
+        final_label = "SUSPICIOUS ⚠️"
+        reason = f"Gemini flags: {', '.join(gemini_indicators[:2])}"
     else:
         final_label = "REAL ✅"
         reason = "No manipulation detected"
