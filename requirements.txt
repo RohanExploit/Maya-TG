@@ -5,5 +5,6 @@ opencv-python-headless
 PyYAML
 Pillow
 numpy
+scipy
 python-telegram-bot==20.7
 google-generativeai

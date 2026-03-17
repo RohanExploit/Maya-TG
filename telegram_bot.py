@@ -225,6 +225,73 @@ def detect_face_swap_opencv(image_path):
             if aspect_ratio < 0.7 or aspect_ratio > 0.95:
                 suspicious_indicators.append("unnatural_proportions")
 
+            # Check 4: Face pattern irregularities (texture analysis)
+            # Detect unnatural skin patterns common in deepfakes
+            face_gray_float = face_gray.astype(np.float32) / 255.0
+
+            # Local Binary Pattern (LBP) for texture analysis
+            from scipy import ndimage
+            lbp = np.zeros_like(face_gray_float)
+            for i in range(1, face_gray_float.shape[0]-1):
+                for j in range(1, face_gray_float.shape[1]-1):
+                    center = face_gray_float[i, j]
+                    binary = (
+                        (face_gray_float[i-1, j-1] >= center) << 7 |
+                        (face_gray_float[i-1, j] >= center) << 6 |
+                        (face_gray_float[i-1, j+1] >= center) << 5 |
+                        (face_gray_float[i, j+1] >= center) << 4 |
+                        (face_gray_float[i+1, j+1] >= center) << 3 |
+                        (face_gray_float[i+1, j] >= center) << 2 |
+                        (face_gray_float[i+1, j-1] >= center) << 1 |
+                        (face_gray_float[i, j-1] >= center)
+                    )
+                    lbp[i, j] = binary
+
+            # Check texture uniformity (deepfakes often have overly smooth skin)
+            lbp_hist = np.histogram(
+                lbp[1:-1, 1:-1], bins=256, range=(0, 256))[0]
+            lbp_entropy = -np.sum((lbp_hist / np.sum(lbp_hist))
+                                  * np.log2(lbp_hist / np.sum(lbp_hist) + 1e-7))
+
+            # Low entropy indicates overly uniform texture (unnatural)
+            if lbp_entropy < 4.5:
+                suspicious_indicators.append("unnatural_skin_texture")
+
+            # Check 5: Facial symmetry analysis
+            face_width = w
+            left_half = face_gray[:, :face_width//2]
+            right_half = face_gray[:, -face_width//2:]
+
+            # Resize to same dimensions for comparison
+            min_h = min(left_half.shape[0], right_half.shape[0])
+            left_half = left_half[:min_h, :]
+            right_half = right_half[:min_h, :]
+
+            # Flip right half for comparison
+            right_half_flipped = np.fliplr(right_half)
+
+            # Calculate symmetry score
+            symmetry_score = np.corrcoef(
+                left_half.flatten(), right_half_flipped.flatten())[0, 1]
+
+            # Perfect symmetry is suspicious (real faces are asymmetric)
+            if symmetry_score > 0.95:
+                suspicious_indicators.append("unnatural_symmetry")
+            elif symmetry_score < 0.6:
+                suspicious_indicators.append("asymmetric_irregularities")
+
+            # Check 6: Eye region analysis
+            eye_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + 'haarcascade_eye.xml')
+            eyes = eye_cascade.detectMultiScale(face_gray, 1.1, 3)
+
+            if len(eyes) >= 2:
+                # Check if eyes are at similar heights (unnatural if perfectly aligned)
+                eye_y_positions = [eye[1] for eye in eyes[:2]]
+                y_diff = abs(eye_y_positions[0] - eye_y_positions[1])
+                if y_diff < 2:  # Too perfectly aligned
+                    suspicious_indicators.append("unnatural_eye_alignment")
+
         is_suspicious = len(suspicious_indicators) >= 2
 
         return {
