@@ -46,7 +46,60 @@ preprocess = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-# === Inference Logic ===
+# === Multi-Layer Detection Logic ===
+
+
+def analyze_image_multi_layer(image_path):
+    """
+    Multi-layer detection:
+    1. Model confidence (>0.7 = high confidence fake)
+    2. Face detection validation
+    3. Combined decision
+    """
+    img = Image.open(image_path).convert("RGB")
+    tensor = preprocess(img).unsqueeze(0)
+
+    # Layer 1: Model prediction
+    with torch.no_grad():
+        out = model(tensor)
+        probs = torch.softmax(out, dim=1)[0]
+        conf, pred = torch.max(probs, dim=0)
+
+    model_confidence = conf.item()
+    model_label = "FAKE" if pred.item() == 1 else "REAL"
+
+    # Layer 2: Face detection
+    face_count = detect_faces_opencv(image_path)
+    face_detected = face_count > 0
+
+    # Multi-layer decision logic
+    if model_confidence > 0.85 and model_label == "FAKE":
+        # High confidence fake detection
+        final_label = "FAKE"
+        confidence = model_confidence
+        reason = "High confidence model prediction"
+    elif model_confidence > 0.7 and model_label == "FAKE":
+        # Medium confidence - check face presence
+        if not face_detected:
+            final_label = "FAKE"
+            confidence = model_confidence * 0.9
+            reason = "Model + No face detected"
+        else:
+            final_label = "SUSPICIOUS"
+            confidence = model_confidence
+            reason = "Medium confidence - manual review suggested"
+    elif not face_detected:
+        # No face but model says real
+        final_label = "UNCLEAR"
+        confidence = 0.5
+        reason = "No face detected"
+    else:
+        # Real detection
+        final_label = "REAL"
+        confidence = 1 - model_confidence if model_label == "FAKE" else model_confidence
+        reason = "Model prediction + Face verified"
+
+    return final_label, confidence, face_count, reason, img
 
 
 def predict_file(file_obj):
@@ -57,21 +110,25 @@ def predict_file(file_obj):
     mime, _ = mimetypes.guess_type(path)
 
     if mime and mime.startswith("image"):
-        img = Image.open(path).convert("RGB")
-        tensor = preprocess(img).unsqueeze(0)
-        with torch.no_grad():
-            out = model(tensor)
-            probs = torch.softmax(out, dim=1)[0]
-            conf, pred = torch.max(probs, dim=0)
+        label, conf, face_count, reason, img = analyze_image_multi_layer(path)
 
-        is_real = pred.item() == 0
-        label = "REAL" if is_real else "DEEPFAKE"
-        color = "#22c55e" if is_real else "#ef4444"
-        icon = "✓" if is_real else "⚠"
+        # Color coding
+        if label == "REAL":
+            color = "#22c55e"
+            bg_color = "linear-gradient(135deg, #064e3b 0%, #065f46 100%)"
+            icon = "✓"
+        elif label == "FAKE":
+            color = "#ef4444"
+            bg_color = "linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)"
+            icon = "⚠"
+        else:  # SUSPICIOUS or UNCLEAR
+            color = "#f59e0b"
+            bg_color = "linear-gradient(135deg, #92400e 0%, #b45309 100%)"
+            icon = "?"
 
-        return label, f"{conf.item()*100:.1f}%", img, gr.update(visible=True, value=f"""
+        return label, f"{conf*100:.1f}%", img, gr.update(visible=True, value=f"""
             <div style="
-                background: {'linear-gradient(135deg, #064e3b 0%, #065f46 100%)' if is_real else 'linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)'};
+                background: {bg_color};
                 border-radius: 12px;
                 padding: 20px;
                 text-align: center;
@@ -80,7 +137,9 @@ def predict_file(file_obj):
             ">
                 <div style="font-size: 48px; margin-bottom: 10px;">{icon}</div>
                 <div style="font-size: 32px; font-weight: bold; color: white; margin-bottom: 5px;">{label}</div>
-                <div style="font-size: 18px; color: rgba(255,255,255,0.8);">Confidence: {conf.item()*100:.1f}%</div>
+                <div style="font-size: 18px; color: rgba(255,255,255,0.8);">Confidence: {conf*100:.1f}%</div>
+                <div style="margin-top: 10px; font-size: 12px; color: rgba(255,255,255,0.6);">{reason}</div>
+                <div style="margin-top: 5px; font-size: 11px; color: rgba(255,255,255,0.5);">Faces detected: {face_count}</div>
             </div>
         """)
 
